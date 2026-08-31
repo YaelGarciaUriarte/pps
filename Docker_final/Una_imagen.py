@@ -230,6 +230,14 @@ def visor3D(path_izq, path_der):
     mesh_left = load_structure(path_izq)
     mesh_right = load_structure(path_der)
 
+    nombre = os.path.basename(path_izq).split('_left')[0]
+
+    stl_left = f"/shared/{nombre}_left_{structure}.stl"
+    stl_right = f"/shared/{nombre}_right_{structure}.stl"
+
+    mesh_left.export(stl_left)
+    mesh_right.export(stl_right)
+
     # Renderizado para la estructura izquierda
     with cols[0]:
         plotter_left = pv.Plotter(window_size=[300, 300])  # Ventana cuadrada
