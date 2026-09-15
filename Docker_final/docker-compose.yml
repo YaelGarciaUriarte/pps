@@ -43,6 +43,8 @@ services:
 
 volumes:
   shared:
+    external: true
+    name: pps_shared
 
 networks:
   app_network:
