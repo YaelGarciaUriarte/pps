@@ -83,19 +83,36 @@ def extract_structure(img_path, structure):
         left_value, right_value = 10, 49
 
     # Extraer las estructuras
+
+    # ESTRUCTURA IZQUIERDA
     left_structure = np.where(data == left_value, data, 0)
-    left_img = nib.Nifti1Image(left_structure, img.affine, img.header)
+
+    # Imagen original:conserva las dimensiones y coordenadas del volumen original
+    left_img_original = nib.Nifti1Image(left_structure, img.affine, img.header)
+
+    # Guardar una copia SIN preprocesar para generar el STL
+    left_visualization_path = os.path.join("/shared", filename.replace(".mgz", f"_left_{structure}_visualization.nii"))
+    nib.save(left_img_original, left_visualization_path)
+
+    # Imagen utilizada por NORAH: se mantiene el preprocesamiento actual
+    left_img = preprocess_image_file_for_anomaly_detection(left_img_original)
     left_output_path = os.path.join("/app", filename.replace(".mgz", f"_left_{structure}.nii"))
-    left_img = preprocess_image_file_for_anomaly_detection(left_img)
     nib.save(left_img, left_output_path)
     output_files.append(left_output_path)
 
-
-
+    # ESTRUCTURA DERECHA
     right_structure = np.where(data == right_value, data, 0)
-    right_img = nib.Nifti1Image(right_structure, img.affine, img.header)
+
+    # Imagen original:conserva las dimensiones y coordenadas del volumen original
+    right_img_original = nib.Nifti1Image(right_structure, img.affine, img.header)
+
+    # Guardar una copia SIN preprocesar para generar el STL
+    right_visualization_path = os.path.join("/shared", filename.replace(".mgz", f"_right_{structure}_visualization.nii"))
+    nib.save(right_img_original, right_visualization_path)
+
+    # Imagen utilizada por NORAH: se mantiene el preprocesamiento actual
+    right_img = preprocess_image_file_for_anomaly_detection(right_img_original)
     right_output_path = os.path.join("/app", filename.replace(".mgz", f"_right_{structure}.nii"))
-    right_img = preprocess_image_file_for_anomaly_detection(right_img)
     nib.save(right_img, right_output_path)
     output_files.append(right_output_path)
 
@@ -221,22 +238,47 @@ def load_structure(path):
     )
     return mesh
 
+#Nueva funcion para generar la malla manteniendo las coordenadas del volumen original
+def load_structure_for_visualization(path):
+    img = nib.load(path)
+    data = img.get_fdata()
+    verts, faces, normals, values = measure.marching_cubes(data, level=0.5)
+    # Pasar de coordenadas de voxel a coordenadas espaciales
+    verts = nib.affines.apply_affine(img.affine, verts)
+    mesh = trimesh.Trimesh(vertices=verts, faces=faces,process=False)
+    mesh = smoothing.filter_laplacian(
+        mesh.subdivide_loop(),
+        lamb=0.5,
+        iterations=10,
+        implicit_time_integration=False,
+        volume_constraint=True
+    )
+    return mesh
+
 def visor3D(path_izq, path_der):
     # Obtener el nombre de la estructura
     structure = os.path.splitext(os.path.basename(path_izq).split('_left_')[1])[0]
     cols = st.columns([1, 0.2, 1], gap="medium")
 
+    # MALLAS PARA LA VISUALIZACIÓN ACTUAL DE NORAH: Se mantiene el comportamiento original de NORAH
     # Cachear la carga y el procesamiento de las estructuras
     mesh_left = load_structure(path_izq)
     mesh_right = load_structure(path_der)
 
     nombre = os.path.basename(path_izq).split('_left')[0]
 
+    # ARCHIVOS ORIGINALES PARA VISUALIZACIÓN EN PHONESTICK
+    left_visualization_path = (f"/shared/{nombre}_left_{structure}_visualization.nii")
+    right_visualization_path = (f"/shared/{nombre}_right_{structure}_visualization.nii")
+    # Generar las mallas conservando las coordenadas espaciales
+    mesh_left_visualization = load_structure_for_visualization(left_visualization_path)
+    mesh_right_visualization = load_structure_for_visualization(right_visualization_path)
+
+    # EXPORTAR STL PARA PHONESTICK
     stl_left = f"/shared/{nombre}_left_{structure}.stl"
     stl_right = f"/shared/{nombre}_right_{structure}.stl"
-
-    mesh_left.export(stl_left)
-    mesh_right.export(stl_right)
+    mesh_left_visualization.export(stl_left)
+    mesh_right_visualization.export(stl_right)
 
     # Renderizado para la estructura izquierda
     with cols[0]:
