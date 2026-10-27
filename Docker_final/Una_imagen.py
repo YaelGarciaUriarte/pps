@@ -116,8 +116,6 @@ def extract_structure(img_path, structure):
     nib.save(right_img, right_output_path)
     output_files.append(right_output_path)
 
-    st.success(f"Estructuras {structure} extraídas")
-
     left_volume = (left_img.get_fdata() > 0).sum()
     right_volume = (right_img.get_fdata() > 0).sum()
     volume_difference = abs(left_volume - right_volume)
@@ -255,6 +253,101 @@ def load_structure_for_visualization(path):
     )
     return mesh
 
+#Nueva funcion para convertir las cordenadas espaciales de los vertices al espacio preprocesado de NORAH (64x64x64)
+def map_vertices_to_heatmap(vertices, original_img):
+    data = original_img.get_fdata()
+    #Obtener la posición de la estructura original
+    coords = np.array(np.nonzero(data > 0))
+    min_coords = np.min(coords, axis=1)
+    max_coords = np.max(coords, axis=1)
+    #Reproducir el centro utilizado por NORAH
+    center = min_coords + ((max_coords - min_coords) // 2)
+    #Inicio del recorte 64x64x64
+    crop_start = center - 32
+    #Pasar los vértices de coordenadas espaciales a coordenadas de voxel
+    inverse_affine = np.linalg.inv(original_img.affine)
+    voxel_coords = nib.affines.apply_affine(
+        inverse_affine,
+        vertices
+    )
+    #Convertir al espacio del recorte
+    heatmap_coords = voxel_coords - crop_start
+    return heatmap_coords
+
+#Nueva funcion que transforma los vértices al espacio del mapa de calor, obtiene un valor por vértice,
+#convierte esos valores a colores mediante plasma y guarda todo en un único GLB.
+def export_heatmap_glb(stl_path, nii_path, heatmap_path):
+    mesh = trimesh.load(stl_path, force="mesh")
+    original_img = nib.load(nii_path)
+    heatmap = np.load(heatmap_path)
+    # Suavizar los valores, como hace NORAH
+    smoothed_heatmap = gaussian_filter(heatmap, sigma=1)
+    # Convertir las coordenadas de la malla al espacio del mapa de calor
+    heatmap_coords = map_vertices_to_heatmap(
+        mesh.vertices,
+        original_img
+    )
+    # Coordenadas alternativas para comparar con NORAH
+    heatmap_coords = heatmap_coords.copy()
+    heatmap_coords[:, 0] = (smoothed_heatmap.shape[0] - 1) - heatmap_coords[:, 0]
+    heatmap_coords -= 0.5
+    valid = np.all(
+        (heatmap_coords >= 0) &
+        (heatmap_coords <= np.array(heatmap.shape) - 1),
+        axis=1
+    )
+    if not np.all(valid):
+        raise ValueError(
+            "Hay vertices fuera del volumen del mapa de calor"
+        )
+    # Obtener el valor correspondiente a cada vertice
+    vertex_heat = map_coordinates(
+        smoothed_heatmap,
+        heatmap_coords.T,
+        order=1,
+        mode="nearest"
+    )
+    # Normalizar valores para aplicar la paleta plasma
+    # Calcular los valores promedio por cara, como hace NORAH
+    average_scalar_per_face = vertex_heat[
+        mesh.faces.astype(int)
+    ].mean(axis=1)
+    # Utilizar esos valores para definir la escala de colores
+    minimum = float(average_scalar_per_face.min())
+    maximum = float(average_scalar_per_face.max())
+    if maximum > minimum:
+        normalized = (vertex_heat - minimum) / (maximum - minimum)
+    else:
+        normalized = np.zeros_like(vertex_heat)
+    # Obtener colores RGBA y convertir a uint8
+    colors = (
+        plt.cm.plasma(normalized) * 255
+    ).astype(np.uint8)
+    # Asignar colores a los vertices de la malla
+    mesh.visual.vertex_colors = colors
+    # Exportar GLB
+    output_path = stl_path.replace(".stl", "_heatmap.glb")
+    mesh.export(output_path, file_type="glb")
+    return output_path
+
+def generar_archivos_phonestick(path_izq, path_der, structure):
+    nombre = os.path.basename(path_izq).split("_left_")[0]
+    # Generar STL de ambas estructuras
+    for side in ["left", "right"]:
+        nii_path = f"/shared/{nombre}_{side}_{structure}_visualization.nii"
+        stl_path = f"/shared/{nombre}_{side}_{structure}.stl"
+        mesh = load_structure_for_visualization(nii_path)
+        mesh.export(stl_path)
+    # Generar el mapa de calor de NORAH
+    file_npy = generar_npy(path_izq, path_der, structure)
+    # Exportar GLB del lado izquierdo
+    export_heatmap_glb(
+        f"/shared/{nombre}_left_{structure}.stl",
+        f"/shared/{nombre}_left_{structure}_visualization.nii",
+        f"/shared/{nombre}_left_{structure}_heatmap.npy"
+    )
+    return file_npy
+
 def visor3D(path_izq, path_der):
     # Obtener el nombre de la estructura
     structure = os.path.splitext(os.path.basename(path_izq).split('_left_')[1])[0]
@@ -266,19 +359,6 @@ def visor3D(path_izq, path_der):
     mesh_right = load_structure(path_der)
 
     nombre = os.path.basename(path_izq).split('_left')[0]
-
-    # ARCHIVOS ORIGINALES PARA VISUALIZACIÓN EN PHONESTICK
-    left_visualization_path = (f"/shared/{nombre}_left_{structure}_visualization.nii")
-    right_visualization_path = (f"/shared/{nombre}_right_{structure}_visualization.nii")
-    # Generar las mallas conservando las coordenadas espaciales
-    mesh_left_visualization = load_structure_for_visualization(left_visualization_path)
-    mesh_right_visualization = load_structure_for_visualization(right_visualization_path)
-
-    # EXPORTAR STL PARA PHONESTICK
-    stl_left = f"/shared/{nombre}_left_{structure}.stl"
-    stl_right = f"/shared/{nombre}_right_{structure}.stl"
-    mesh_left_visualization.export(stl_left)
-    mesh_right_visualization.export(stl_right)
 
     # Renderizado para la estructura izquierda
     with cols[0]:
@@ -524,6 +604,9 @@ def tab_2():
         if img_path2:
             # Extraer las estructuras y guardar los paths en session_state
             path_izq, path_der = extract_structure(img_path2, structure)
+            file_npy = generar_archivos_phonestick(path_izq, path_der, structure)
+            st.session_state.mapa_npys[path_izq] = file_npy
+            st.success(f"Estructuras {structure} extraídas")
             st.session_state.path_izq = path_izq
             st.session_state.path_der = path_der
             nombre = os.path.basename(path_izq).split('_left')[0]
@@ -539,19 +622,17 @@ def tab_2():
         else:
             st.error("Por favor, selecciona un archivo segmentado o sube uno manualmente y selecciona una estructura.")
     
-    # Mostrar el botón "Ver malla" solo si ya se realizó la extracción y aún no se visualizó la malla
+    # Mostrar el botón "Ver malla"
     if st.session_state.extraido:
-        if st.button("Ver malla",disabled=st.session_state.malla_vista):
-            # Usar los paths almacenados en session_state
-            if st.session_state.path_izq is not None and st.session_state.path_der is not None:
-                with st.spinner('Creando la malla de la imagen, por favor espera...'):
-                    file_npy = generar_npy(st.session_state.path_izq, st.session_state.path_der,st.session_state.structure)
+        if st.button("Ver malla", disabled=st.session_state.malla_vista):
+            if (
+                st.session_state.path_izq is not None
+                and st.session_state.path_der is not None
+            ):
                 st.session_state.malla_vista = True
-                st.session_state.mapa_npys[st.session_state.path_izq] = file_npy
                 st.rerun()
-    
             else:
-                st.error("ya se hizo la malla de esta imagen")
+                st.error("Primero tenés que extraer una estructura.")
 
     if st.session_state.malla_vista:
         st.session_state.malla_vista = False
@@ -566,11 +647,6 @@ def tab_2():
         st.session_state.path_der = None
         st.write('Se podra ver todo esto en la pestaña "imagenes"')
     
-
-
-
-
-
 
     
 def tab_3():
@@ -813,7 +889,15 @@ def asimetria(image,imagepair,structure):
     return NORAH_index #, file_npy
 
 def generar_npy(image,imagepair,structure):
+    #Genera mapa de calor (procedimiento original)
     file_npy = occlusion(image,imagepair,structure)
+    #Obtener el nombre del paciente
+    nombre = os.path.basename(image).split("_left_")[0]
+    #Nombre del archivo que guardaremos en el volumen compartido
+    heatmap_path = f"/shared/{nombre}_left_{structure}_heatmap.npy"
+    #Guardar los valores del mapa de calor
+    np.save(heatmap_path, file_npy)
+    #Mantener comportamiento original de Norah
     return file_npy
 
 
