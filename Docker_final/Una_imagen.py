@@ -5,6 +5,7 @@ import os
 import subprocess
 import pandas as pd
 import torch
+import json
 torch.classes.__path__ = [os.path.join(torch.__path__[0], torch.classes.__file__)] 
 
 import shutil
@@ -328,6 +329,18 @@ def export_heatmap_glb(stl_path, nii_path, heatmap_path):
     # Exportar GLB
     output_path = stl_path.replace(".stl", "_heatmap.glb")
     mesh.export(output_path, file_type="glb")
+    # Guardar valores de oclusión y sus coordenadas
+    metadata = {
+        "minimum": minimum,
+        "maximum": maximum,
+        "vertices": mesh.vertices.tolist(),
+        "values": vertex_heat.tolist()
+    }
+
+    metadata_path = output_path.replace(".glb", ".json")
+
+    with open(metadata_path, "w", encoding="utf-8") as file:
+        json.dump(metadata, file)
     return output_path
 
 def generar_archivos_phonestick(path_izq, path_der, structure):
