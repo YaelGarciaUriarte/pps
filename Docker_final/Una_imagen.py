@@ -277,59 +277,84 @@ def map_vertices_to_heatmap(vertices, original_img):
 
 #Nueva funcion que transforma los vértices al espacio del mapa de calor, obtiene un valor por vértice,
 #convierte esos valores a colores mediante plasma y guarda todo en un único GLB.
-def export_heatmap_glb(stl_path, nii_path, heatmap_path):
+def export_heatmap_glb(stl_path, nii_path, heatmap_path, mirror=False, color_range=None):
     mesh = trimesh.load(stl_path, force="mesh")
     original_img = nib.load(nii_path)
     heatmap = np.load(heatmap_path)
+
     # Suavizar los valores, como hace NORAH
     smoothed_heatmap = gaussian_filter(heatmap, sigma=1)
-    # Convertir las coordenadas de la malla al espacio del mapa de calor
+
+    # Convertir las coordenadas de la malla
+    # al espacio del mapa de calor
     heatmap_coords = map_vertices_to_heatmap(
         mesh.vertices,
         original_img
     )
-    # Coordenadas alternativas para comparar con NORAH
+
     heatmap_coords = heatmap_coords.copy()
-    heatmap_coords[:, 0] = (smoothed_heatmap.shape[0] - 1) - heatmap_coords[:, 0]
+
+    heatmap_coords = heatmap_coords.copy()
+
+    # Corrección de orientación original para el lado izquierdo
+    if not mirror:
+        heatmap_coords[:, 0] = (
+            smoothed_heatmap.shape[0] - 1
+        ) - heatmap_coords[:, 0]
+
+    # Ajuste de medio vóxel
     heatmap_coords -= 0.5
+
+    # Verificar coordenadas
     valid = np.all(
         (heatmap_coords >= 0) &
         (heatmap_coords <= np.array(heatmap.shape) - 1),
         axis=1
     )
+
     if not np.all(valid):
         raise ValueError(
             "Hay vertices fuera del volumen del mapa de calor"
         )
-    # Obtener el valor correspondiente a cada vertice
+
+    # Obtener valores para cada vertice
     vertex_heat = map_coordinates(
         smoothed_heatmap,
         heatmap_coords.T,
         order=1,
         mode="nearest"
     )
-    # Normalizar valores para aplicar la paleta plasma
-    # Calcular los valores promedio por cara, como hace NORAH
+
+    # Calcular valores promedio por cara
     average_scalar_per_face = vertex_heat[
         mesh.faces.astype(int)
     ].mean(axis=1)
-    # Utilizar esos valores para definir la escala de colores
+
     minimum = float(average_scalar_per_face.min())
     maximum = float(average_scalar_per_face.max())
+
+    if color_range is not None:
+        minimum, maximum = color_range
+
+    # Normalizar valores
     if maximum > minimum:
         normalized = (vertex_heat - minimum) / (maximum - minimum)
+        normalized = np.clip(normalized, 0, 1)
     else:
         normalized = np.zeros_like(vertex_heat)
-    # Obtener colores RGBA y convertir a uint8
+
+    # Aplicar paleta plasma
     colors = (
         plt.cm.plasma(normalized) * 255
     ).astype(np.uint8)
-    # Asignar colores a los vertices de la malla
+
     mesh.visual.vertex_colors = colors
+
     # Exportar GLB
     output_path = stl_path.replace(".stl", "_heatmap.glb")
     mesh.export(output_path, file_type="glb")
-    # Guardar valores de oclusión y sus coordenadas
+
+    # Exportar valores y coordenadas
     metadata = {
         "minimum": minimum,
         "maximum": maximum,
@@ -341,24 +366,53 @@ def export_heatmap_glb(stl_path, nii_path, heatmap_path):
 
     with open(metadata_path, "w", encoding="utf-8") as file:
         json.dump(metadata, file)
+
     return output_path
 
 def generar_archivos_phonestick(path_izq, path_der, structure):
     nombre = os.path.basename(path_izq).split("_left_")[0]
+
     # Generar STL de ambas estructuras
     for side in ["left", "right"]:
         nii_path = f"/shared/{nombre}_{side}_{structure}_visualization.nii"
         stl_path = f"/shared/{nombre}_{side}_{structure}.stl"
+
         mesh = load_structure_for_visualization(nii_path)
         mesh.export(stl_path)
-    # Generar el mapa de calor de NORAH
+
+    # Generar el mapa de calor original de NORAH
     file_npy = generar_npy(path_izq, path_der, structure)
-    # Exportar GLB del lado izquierdo
-    export_heatmap_glb(
+
+    heatmap_path = f"/shared/{nombre}_left_{structure}_heatmap.npy"
+
+    # Exportar mapa de calor izquierdo 
+    left_glb_path = export_heatmap_glb(
         f"/shared/{nombre}_left_{structure}.stl",
         f"/shared/{nombre}_left_{structure}_visualization.nii",
-        f"/shared/{nombre}_left_{structure}_heatmap.npy"
+        heatmap_path,
+        mirror=False
     )
+
+    # Leer los límites calculados para el izquierdo
+    left_json_path = left_glb_path.replace(".glb", ".json")
+
+    with open(left_json_path, "r", encoding="utf-8") as file:
+        left_metadata = json.load(file)
+
+    shared_range = (
+        left_metadata["minimum"],
+        left_metadata["maximum"]
+    )
+
+    # Exportar mapa derecho usando la misma escala
+    export_heatmap_glb(
+        f"/shared/{nombre}_right_{structure}.stl",
+        f"/shared/{nombre}_right_{structure}_visualization.nii",
+        heatmap_path,
+        mirror=True,
+        color_range=shared_range
+    )
+
     return file_npy
 
 def visor3D(path_izq, path_der):
